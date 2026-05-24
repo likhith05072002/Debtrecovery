@@ -1,19 +1,34 @@
 """
 Rumik Silk TTS plugin for LiveKit Agents.
 
-Custom LiveKit TTS provider wrapping Rumik Silk API.
-Supports emotional mid-sentence tags for pressure-aware voice modulation.
+Discovered API surface (from silk-dashboard-api.rumik.ai):
 
-Pressure → Emotion mapping:
-    Level 0 → <neutral>/<warm>   (calm, professional)
-    Level 1 → <firm>             (confident, direct)
-    Level 2 → <firm>             (assertive, serious)
-    Level 3 → <stern>            (authoritative)
-    Level 4 → <urgent>           (pressing, last-chance)
-    De-esc  → <empathetic>       (warm, encouraging)
+Base URL: https://silk-dashboard-api.rumik.ai
+Auth:     Bearer {rk_live_xxx} or Firebase ID token
+
+Endpoints:
+  GET  /api/v1/models                        → list models (muga, mulberry)
+  POST /api/playground/tts                    → non-streaming TTS
+  WSS  /api/v1/playground/tts/stream?token=X  → streaming TTS (WebSocket)
+
+WebSocket protocol:
+  → Client sends: JSON {text, model, voiceId, ...}
+  ← Server sends: "ready" → "queued" → "started" → binary audio → "done"
+
+Models:
+  muga     — premium ($25/M chars), highest quality
+  mulberry — standard ($10/M chars), good quality
+
+Pressure → Emotion mapping (via Silk prompt engineering):
+  Level 0 → neutral/warm
+  Level 1-2 → firm
+  Level 3 → stern
+  Level 4 → urgent
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -25,47 +40,25 @@ from livekit.agents import tts, utils
 
 logger = logging.getLogger(__name__)
 
-SILK_API_URL = "https://api.rumik.ai/v1/tts/stream"
+SILK_API_BASE = "https://silk-dashboard-api.rumik.ai"
+SILK_WS_BASE = "wss://silk-dashboard-api.rumik.ai"
 
-# Emotion tags Silk supports
-PRESSURE_TO_EMOTION = {
-    0: "neutral",
-    1: "firm",
-    2: "firm",
-    3: "stern",
-    4: "urgent",
+PRESSURE_TO_STYLE = {
+    0: "neutral, professional, calm",
+    1: "firm, confident, direct",
+    2: "assertive, serious, no-nonsense",
+    3: "stern, authoritative, pressing",
+    4: "urgent, last-chance, final warning",
 }
 
-SILK_VOICE_MAP = {
-    "en": "silk-en-male-professional",
-    "hi": "silk-hi-male-professional",
-    "kn": "silk-kn-male-professional",
-    "te": "silk-te-male-professional",
-    "ta": "silk-ta-male-professional",
-    "ml": "silk-ml-male-professional",
-    "bn": "silk-bn-male-professional",
-}
-
-
-@dataclass
-class SilkTTSOptions:
-    api_key: str
-    voice_id: str = "silk-en-male-professional"
-    model_id: str = "silk-v1"
-    language: str = "en"
-    sample_rate: int = 24000
-    emotion: str = "neutral"
+DEESCALATION_STYLE = "empathetic, warm, encouraging, relieved"
 
 
 class SilkTTS(tts.TTS):
     """Custom LiveKit TTS plugin for Rumik Silk.
 
-    Usage with LiveKit AgentSession:
-        silk = SilkTTS(
-            api_key="sk_...",
-            voice_id="silk-en-male-professional",
-            language="en",
-        )
+    Usage:
+        silk = SilkTTS(api_key="rk_live_...", model="muga")
         session = AgentSession(tts=silk, ...)
     """
 
@@ -73,9 +66,8 @@ class SilkTTS(tts.TTS):
         self,
         *,
         api_key: str,
+        model: str = "muga",
         voice_id: str | None = None,
-        model_id: str = "silk-v1",
-        language: str = "en",
         sample_rate: int = 24000,
     ) -> None:
         super().__init__(
@@ -83,22 +75,23 @@ class SilkTTS(tts.TTS):
             sample_rate=sample_rate,
             num_channels=1,
         )
-        self._opts = SilkTTSOptions(
-            api_key=api_key,
-            voice_id=voice_id or SILK_VOICE_MAP.get(language, SILK_VOICE_MAP["en"]),
-            model_id=model_id,
-            language=language,
-            sample_rate=sample_rate,
-        )
-        self._current_emotion = "neutral"
-
-    def set_emotion(self, emotion: str) -> None:
-        """Set emotion for next synthesis. Call before each turn based on pressure level."""
-        self._current_emotion = emotion
+        self._api_key = api_key
+        self._model = model
+        self._voice_id = voice_id
+        self._sample_rate = sample_rate
+        self._style_prompt: str = PRESSURE_TO_STYLE[0]
 
     def set_pressure_level(self, level: int) -> None:
-        """Set emotion based on pressure escalation level (0-4)."""
-        self._current_emotion = PRESSURE_TO_EMOTION.get(level, "neutral")
+        """Set voice style based on pressure escalation level (0-4)."""
+        self._style_prompt = PRESSURE_TO_STYLE.get(level, PRESSURE_TO_STYLE[0])
+
+    def set_deescalation(self) -> None:
+        """Switch to empathetic tone for payment intent de-escalation."""
+        self._style_prompt = DEESCALATION_STYLE
+
+    def set_style(self, style: str) -> None:
+        """Set arbitrary style prompt."""
+        self._style_prompt = style
 
     def synthesize(self, text: str, *, conn_options: tts.APIConnectOptions | None = None) -> "SilkChunkedStream":
         return SilkChunkedStream(tts=self, text=text, conn_options=conn_options)
@@ -108,93 +101,142 @@ class SilkTTS(tts.TTS):
 
 
 class SilkChunkedStream(tts.ChunkedStream):
-    """Streams audio from a single Silk API call."""
+    """Non-streaming TTS via HTTP POST."""
 
     def __init__(self, *, tts: SilkTTS, text: str, conn_options: tts.APIConnectOptions | None) -> None:
         super().__init__(tts=tts, input_text=text, conn_options=conn_options)
-        self._tts = tts
+        self._silk = tts
 
     async def _run(self) -> None:
-        """Execute the Silk API call and emit audio frames."""
-        opts = self._tts._opts
-        emotion = self._tts._current_emotion
-
-        # Inject emotion tag if not neutral
-        tagged_text = self.input_text
-        if emotion and emotion != "neutral":
-            tagged_text = f"<{emotion}> {self.input_text}"
-
         headers = {
-            "Authorization": f"Bearer {opts.api_key}",
+            "Authorization": f"Bearer {self._silk._api_key}",
             "Content-Type": "application/json",
-            "Accept": "audio/pcm",
         }
         payload = {
-            "text": tagged_text,
-            "voice_id": opts.voice_id,
-            "model_id": opts.model_id,
-            "language": opts.language,
-            "sample_rate": opts.sample_rate,
-            "output_format": "pcm_s16le",
-            "emotion": emotion,
-            "stream": True,
+            "text": self.input_text,
+            "model": self._silk._model,
         }
+        if self._silk._voice_id:
+            payload["voiceId"] = self._silk._voice_id
 
         request_id = utils.shortuuid()
         t0 = time.monotonic()
-        first_frame = True
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                async with client.stream("POST", SILK_API_URL, json=payload, headers=headers) as response:
+                async with client.stream("POST", f"{SILK_API_BASE}/api/playground/tts",
+                                          json=payload, headers=headers) as response:
                     if response.status_code != 200:
                         body = await response.aread()
-                        logger.error("Silk API %d: %s", response.status_code, body[:300])
-                        raise Exception(f"Silk API error: {response.status_code}")
+                        raise Exception(f"Silk HTTP {response.status_code}: {body[:200]}")
 
+                    first = True
                     async for raw_chunk in response.aiter_bytes(4096):
-                        if first_frame:
-                            ttfb = time.monotonic() - t0
-                            logger.info("Silk TTFB: %.0fms voice=%s emotion=%s",
-                                        ttfb * 1000, opts.voice_id, emotion)
-                            first_frame = False
+                        if first:
+                            logger.info("Silk TTFB: %.0fms model=%s",
+                                        (time.monotonic() - t0) * 1000, self._silk._model)
+                            first = False
 
-                        # Convert raw PCM bytes to LiveKit AudioFrame
                         samples = np.frombuffer(raw_chunk, dtype=np.int16)
+                        if len(samples) == 0:
+                            continue
+
                         frame = tts.AudioFrame(
                             data=samples.tobytes(),
-                            sample_rate=opts.sample_rate,
+                            sample_rate=self._silk._sample_rate,
                             num_channels=1,
                             samples_per_channel=len(samples),
                         )
-
                         self._event_ch.send_nowait(
-                            tts.SynthesizedAudio(
-                                request_id=request_id,
-                                frame=frame,
-                            )
+                            tts.SynthesizedAudio(request_id=request_id, frame=frame)
                         )
 
-        except httpx.TimeoutException:
-            logger.error("Silk API timeout for text: %.40s", self.input_text)
-            raise
         except Exception as exc:
-            logger.error("Silk streaming error: %s", exc)
+            logger.error("Silk TTS error: %s", exc)
             raise
 
 
 class SilkSynthesizeStream(tts.SynthesizeStream):
-    """Streaming TTS — accepts text chunks, emits audio frames continuously."""
+    """Streaming TTS via WebSocket — lowest latency path.
+
+    WebSocket protocol:
+      Connect: wss://silk-dashboard-api.rumik.ai/api/v1/playground/tts/stream?token={api_key}
+      Send:    JSON {text, model, voiceId}
+      Receive: JSON "ready" → JSON "started" → binary audio chunks → JSON "done"
+    """
 
     def __init__(self, *, tts: SilkTTS) -> None:
         super().__init__(tts=tts)
-        self._tts = tts
+        self._silk = tts
 
     async def _run(self) -> None:
-        """Process text chunks from the input stream and synthesize audio."""
-        async for text_input in self._input_ch:
-            if isinstance(text_input, str) and text_input.strip():
-                # Synthesize each text chunk individually
-                stream = self._tts.synthesize(text_input)
-                async for event in stream:
-                    self._event_ch.send_nowait(event)
+        import websockets
+
+        ws_url = f"{SILK_WS_BASE}/api/v1/playground/tts/stream?token={self._silk._api_key}"
+
+        try:
+            async with websockets.connect(
+                ws_url,
+                ping_interval=20,
+                ping_timeout=10,
+                max_size=2**20,
+            ) as ws:
+                # Process text inputs from the pipeline
+                async for text_input in self._input_ch:
+                    if not isinstance(text_input, str) or not text_input.strip():
+                        continue
+
+                    request_id = utils.shortuuid()
+                    t0 = time.monotonic()
+
+                    # Send synthesis request
+                    msg = {
+                        "text": text_input.strip(),
+                        "model": self._silk._model,
+                    }
+                    if self._silk._voice_id:
+                        msg["voiceId"] = self._silk._voice_id
+
+                    await ws.send(json.dumps(msg))
+
+                    # Receive audio chunks until "done"
+                    first_audio = True
+                    async for message in ws:
+                        if isinstance(message, bytes):
+                            # Binary = PCM audio data
+                            if first_audio:
+                                logger.info("Silk WS TTFB: %.0fms",
+                                            (time.monotonic() - t0) * 1000)
+                                first_audio = False
+
+                            samples = np.frombuffer(message, dtype=np.int16)
+                            if len(samples) == 0:
+                                continue
+
+                            frame = tts.AudioFrame(
+                                data=samples.tobytes(),
+                                sample_rate=self._silk._sample_rate,
+                                num_channels=1,
+                                samples_per_channel=len(samples),
+                            )
+                            self._event_ch.send_nowait(
+                                tts.SynthesizedAudio(request_id=request_id, frame=frame)
+                            )
+
+                        elif isinstance(message, str):
+                            data = json.loads(message)
+                            msg_type = data.get("type", data.get("status", ""))
+
+                            if msg_type == "done":
+                                break
+                            elif msg_type == "error":
+                                logger.error("Silk WS error: %s", data.get("message"))
+                                break
+                            elif msg_type in ("ready", "queued", "started"):
+                                continue
+                            else:
+                                logger.debug("Silk WS unknown message: %s", data)
+
+        except Exception as exc:
+            logger.error("Silk WebSocket error: %s", exc)
+            raise

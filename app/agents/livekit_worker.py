@@ -166,24 +166,15 @@ async def handle_sip_call(ctx: JobContext) -> None:
             agent_name=settings.agent_name,
         )
 
-    # ── 7. Create TTS (Silk with ElevenLabs fallback) ────────────────────────
-    silk_tts = None
-    if settings.silk_api_key:
-        from app.services.tts.silk_livekit_plugin import SilkTTS
-        silk_tts = SilkTTS(
-            api_key=settings.silk_api_key,
-            voice_id=settings.silk_default_voice,
-            model_id=settings.silk_model_id,
-            language=borrower_ctx.preferred_language,
-            sample_rate=settings.silk_sample_rate,
-        )
-        tts_provider = silk_tts
-    else:
-        # Fallback to ElevenLabs via LiveKit plugin
-        tts_provider = inference.TTS(
-            "elevenlabs/eleven_turbo_v2",
-            voice=settings.elevenlabs_voice_id,
-        )
+    # ── 7. Create TTS (Rumik Silk) ───────────────────────────────────────────
+    from app.services.tts.silk_livekit_plugin import SilkTTS
+    silk_tts = SilkTTS(
+        api_key=settings.silk_api_key,
+        model=settings.silk_model_id,
+        voice_id=settings.silk_default_voice if settings.silk_default_voice else None,
+        sample_rate=settings.silk_sample_rate,
+    )
+    tts_provider = silk_tts
 
     # ── 8. Create LiveKit session ────────────────────────────────────────────
     # Import turn detector

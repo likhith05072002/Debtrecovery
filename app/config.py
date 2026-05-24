@@ -66,10 +66,10 @@ class Settings(BaseSettings):
 
     # ── Rumik Silk (TTS) ─────────────────────────────────────────────────────
     silk_api_key: str = ""
-    silk_model_id: str = "silk-v1"
-    silk_sample_rate: int = 24000              # 24000 or 16000
-    silk_default_voice: str = "silk-en-male-professional"
-    tts_provider: str = "auto"                 # "silk" | "elevenlabs" | "auto"
+    silk_model_id: str = "muga"                # muga (premium) | mulberry (standard)
+    silk_sample_rate: int = 24000
+    silk_default_voice: str = ""               # voice ID from Silk playground
+    tts_provider: str = "silk"                 # "silk" | "elevenlabs" | "auto"
 
     # ── LiveKit ───────────────────────────────────────────────────────────────
     livekit_url: str = ""                      # wss://your-project.livekit.cloud
