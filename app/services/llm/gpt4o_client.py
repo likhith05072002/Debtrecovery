@@ -1,6 +1,9 @@
 """
-GPT-4o client with streaming + function calling.
+Gemini LLM client with streaming + function calling.
 Implements sentence-boundary detection for early TTS dispatch.
+
+Replaces OpenAI GPT-4o with Google Gemini (gemini-2.0-flash).
+Same interface — session_orchestrator doesn't know the difference.
 """
 from __future__ import annotations
 
@@ -13,7 +16,8 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Optional
 
-from openai import AsyncOpenAI
+from google import genai
+from google.genai import types
 
 from app.config import get_settings
 from app.services.llm.function_registry import FUNCTION_REGISTRY
@@ -32,27 +36,66 @@ class LLMResponse:
     finish_reason: str = ""
 
 
+def _build_gemini_tools() -> list[types.Tool]:
+    """Convert our OpenAI-format function registry to Gemini tool format."""
+    function_declarations = []
+    for fn in FUNCTION_REGISTRY:
+        # Convert OpenAI JSON Schema to Gemini format
+        params = fn.get("parameters", {})
+        properties = {}
+        required = params.get("required", [])
+
+        for prop_name, prop_def in params.get("properties", {}).items():
+            prop_type = prop_def.get("type", "string").upper()
+            # Map JSON Schema types to Gemini types
+            type_map = {
+                "STRING": "STRING",
+                "NUMBER": "NUMBER",
+                "INTEGER": "INTEGER",
+                "BOOLEAN": "BOOLEAN",
+                "ARRAY": "ARRAY",
+            }
+            schema = types.Schema(
+                type=type_map.get(prop_type, "STRING"),
+                description=prop_def.get("description", ""),
+            )
+            if "enum" in prop_def:
+                schema.enum = prop_def["enum"]
+            properties[prop_name] = schema
+
+        function_declarations.append(types.FunctionDeclaration(
+            name=fn["name"],
+            description=fn.get("description", ""),
+            parameters=types.Schema(
+                type="OBJECT",
+                properties=properties,
+                required=required,
+            ),
+        ))
+
+    return [types.Tool(function_declarations=function_declarations)]
+
+
 class GPT4oClient:
     """
-    Streaming GPT-4o client for real-time voice agent responses.
+    Streaming Gemini client for real-time voice agent responses.
 
     Key design: streams tokens and dispatches TTS as soon as a full sentence
     is formed — without waiting for the full response. This is the primary
     latency optimization that brings end-to-end response time under 600ms.
 
-    Fast-first-sentence mode: uses a smaller, faster model (gpt-4o-mini)
-    to generate the first sentence, then switches to the main model for
-    the rest. Reduces TTFT from ~500ms to ~150ms.
+    Despite the class name (kept for backward compatibility), this now uses
+    Google Gemini instead of OpenAI GPT-4o.
     """
 
     def __init__(self) -> None:
         settings = get_settings()
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
-        self._model = settings.openai_llm_model
-        self._max_tokens = settings.openai_llm_max_tokens
-        self._temperature = settings.openai_llm_temperature
-        self._fast_model = settings.openai_fast_model
-        self._fast_max_tokens = settings.openai_fast_max_tokens
+        self._client = genai.Client(api_key=settings.gemini_api_key)
+        self._model = settings.gemini_model
+        self._max_tokens = settings.gemini_max_tokens
+        self._temperature = settings.gemini_temperature
+        self._fast_model = settings.gemini_fast_model
+        self._tools = _build_gemini_tools()
 
     async def generate_response(
         self,
@@ -61,7 +104,7 @@ class GPT4oClient:
         on_sentence: "Callable[[str], Awaitable[None]] | None" = None,
     ) -> LLMResponse:
         """
-        Stream a GPT-4o response. Calls on_sentence() as soon as each complete
+        Stream a Gemini response. Calls on_sentence() as soon as each complete
         sentence is available (for immediate TTS dispatch).
 
         Returns the full LLMResponse after stream completes.
@@ -70,79 +113,83 @@ class GPT4oClient:
         result = LLMResponse()
         sentence_buffer = ""
         function_call_name = ""
-        function_call_args = ""
-        function_call_index = 0   # track first tool call only (ignore parallel calls)
+        function_call_args = {}
 
-        _new_model = any(self._model.startswith(p) for p in ("gpt-5", "o1", "o3", "o4"))
-        # gpt-5+, o1, o3, o4 require max_completion_tokens; older models use max_tokens
-        _token_kwarg = {"max_completion_tokens": self._max_tokens} if _new_model else {"max_tokens": self._max_tokens}
-        # gpt-5+, o1, o3, o4 don't support custom temperature (only default 1)
-        _temp_kwarg = {} if _new_model else {"temperature": self._temperature}
+        # Convert OpenAI-format messages to Gemini format
+        gemini_contents = []
+        for msg in conversation_history:
+            role = msg["role"]
+            content = msg.get("content", "")
+            if role == "assistant":
+                gemini_contents.append(types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text=content)],
+                ))
+            elif role in ("user", "system"):
+                gemini_contents.append(types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=content)],
+                ))
+
+        config = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            max_output_tokens=self._max_tokens,
+            temperature=self._temperature,
+            tools=self._tools,
+        )
 
         try:
-            stream = await self._client.chat.completions.create(
+            response = await self._client.aio.models.generate_content_stream(
                 model=self._model,
-                messages=[{"role": "system", "content": system_prompt}] + conversation_history,
-                tools=[{"type": "function", "function": f} for f in FUNCTION_REGISTRY],
-                tool_choice="auto",
-                **_token_kwarg,
-                **_temp_kwarg,
-                stream=True,
+                contents=gemini_contents,
+                config=config,
             )
 
-            async for chunk in stream:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                if not delta:
+            async for chunk in response:
+                if not chunk.candidates:
                     continue
 
-                finish_reason = chunk.choices[0].finish_reason
+                candidate = chunk.candidates[0]
 
-                # ── Text content ──────────────────────────────────────────────
-                if delta.content:
-                    token = delta.content
-                    result.text += token
-                    sentence_buffer += token
+                # Check for function calls
+                if candidate.content and candidate.content.parts:
+                    for part in candidate.content.parts:
+                        # Text content
+                        if part.text:
+                            token = part.text
+                            result.text += token
+                            sentence_buffer += token
 
-                    # Dispatch to TTS as soon as a sentence boundary is detected
-                    if on_sentence and SENTENCE_ENDINGS.search(sentence_buffer):
-                        parts = SENTENCE_ENDINGS.split(sentence_buffer)
-                        for sentence in parts[:-1]:
-                            sentence = sentence.strip()
-                            if sentence:
-                                await on_sentence(sentence)
-                        sentence_buffer = parts[-1]
+                            # Dispatch to TTS as soon as a sentence boundary is detected
+                            if on_sentence and SENTENCE_ENDINGS.search(sentence_buffer):
+                                parts = SENTENCE_ENDINGS.split(sentence_buffer)
+                                for sentence in parts[:-1]:
+                                    sentence = sentence.strip()
+                                    if sentence:
+                                        await on_sentence(sentence)
+                                sentence_buffer = parts[-1]
 
-                # ── Function call accumulation ────────────────────────────────
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        # Only accumulate the first tool call (index 0).
-                        # gpt-4o-mini sometimes fires parallel tool calls; concatenating
-                        # all their args produces invalid JSON. We take the first and drop the rest.
-                        if tc.index is not None and tc.index > 0:
-                            continue
-                        if tc.function:
-                            if tc.function.name:
-                                function_call_name += tc.function.name
-                            if tc.function.arguments:
-                                function_call_args += tc.function.arguments
+                        # Function call
+                        if hasattr(part, 'function_call') and part.function_call:
+                            fc = part.function_call
+                            function_call_name = fc.name
+                            function_call_args = dict(fc.args) if fc.args else {}
 
-                if finish_reason:
-                    result.finish_reason = finish_reason
+                # Check finish reason
+                if candidate.finish_reason:
+                    result.finish_reason = str(candidate.finish_reason)
 
-            # Flush any remaining sentence buffer
+            # Flush remaining sentence buffer
             if on_sentence and sentence_buffer.strip():
                 await on_sentence(sentence_buffer.strip())
 
-            # Parse function call if present
+            # Set function call if present
             if function_call_name:
                 result.function_name = function_call_name
-                try:
-                    result.function_args = json.loads(function_call_args)
-                except json.JSONDecodeError:
-                    logger.warning("Could not parse function args: %s", function_call_args)
+                result.function_args = function_call_args
 
         except Exception as exc:
-            logger.error("GPT-4o streaming error (model=%s): %s", self._model, exc)
+            logger.error("Gemini streaming error (model=%s): %s", self._model, exc)
             raise
 
         result.latency_ms = int((time.monotonic() - t0) * 1000)
@@ -155,47 +202,56 @@ class GPT4oClient:
     ) -> str | None:
         """Generate ONLY the first sentence using a fast model for low TTFT.
 
-        Returns the first sentence as a string, or None on failure.
-        This runs concurrently with the main model — whichever produces
-        a first sentence first wins. The main model's response continues
-        to generate the remaining sentences.
-
-        Typical latency: ~100-200ms TTFT (vs ~400-600ms for gpt-4o).
+        Uses gemini-2.0-flash-lite (~100ms TTFT).
         """
         try:
-            # Add instruction to generate only one short sentence
-            fast_messages = [
-                {"role": "system", "content": system_prompt},
-                *conversation_history,
-                {
-                    "role": "user",
-                    "content": (
-                        "[INTERNAL: Generate ONLY the first sentence of your response. "
-                        "Keep it under 15 words. Be direct. Do not continue beyond one sentence.]"
-                    ),
-                },
-            ]
+            gemini_contents = []
+            for msg in conversation_history:
+                role = msg["role"]
+                content = msg.get("content", "")
+                if role == "assistant":
+                    gemini_contents.append(types.Content(
+                        role="model",
+                        parts=[types.Part.from_text(text=content)],
+                    ))
+                elif role in ("user", "system"):
+                    gemini_contents.append(types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=content)],
+                    ))
 
-            _new_model = any(self._fast_model.startswith(p) for p in ("gpt-5", "o1", "o3", "o4"))
-            _token_kwarg = {"max_completion_tokens": self._fast_max_tokens} if _new_model else {"max_tokens": self._fast_max_tokens}
-            _temp_kwarg = {} if _new_model else {"temperature": self._temperature}
+            # Add instruction for first sentence only
+            gemini_contents.append(types.Content(
+                role="user",
+                parts=[types.Part.from_text(
+                    text="[INTERNAL: Generate ONLY the first sentence of your response. "
+                         "Keep it under 15 words. Be direct. Do not continue beyond one sentence.]"
+                )],
+            ))
 
-            stream = await self._client.chat.completions.create(
+            config = types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                max_output_tokens=60,
+                temperature=self._temperature,
+            )
+
+            response = await self._client.aio.models.generate_content_stream(
                 model=self._fast_model,
-                messages=fast_messages,
-                **_token_kwarg,
-                **_temp_kwarg,
-                stream=True,
+                contents=gemini_contents,
+                config=config,
             )
 
             sentence = ""
-            async for chunk in stream:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                if delta and delta.content:
-                    sentence += delta.content
-                    # Stop at first sentence boundary
-                    if SENTENCE_ENDINGS.search(sentence) or sentence.strip().endswith((".", "!", "?")):
-                        break
+            async for chunk in response:
+                if not chunk.candidates:
+                    continue
+                candidate = chunk.candidates[0]
+                if candidate.content and candidate.content.parts:
+                    for part in candidate.content.parts:
+                        if part.text:
+                            sentence += part.text
+                            if SENTENCE_ENDINGS.search(sentence) or sentence.strip().endswith((".", "!", "?")):
+                                break
 
             sentence = sentence.strip()
             if sentence:

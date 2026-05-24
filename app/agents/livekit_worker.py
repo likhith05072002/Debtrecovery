@@ -195,7 +195,7 @@ async def handle_sip_call(ctx: JobContext) -> None:
     session = AgentSession(
         vad=silero.VAD.load(),
         stt=inference.STT("deepgram/nova-3", language="multi"),
-        llm=inference.LLM("openai/gpt-4o"),
+        llm=inference.LLM(f"google/{settings.gemini_model}"),
         tts=tts_provider,
         turn_detection=turn_detection,
     )

@@ -1,9 +1,8 @@
 """
-GPT-4o structured analysis for human call transcripts.
+Gemini structured analysis for call transcripts.
 
-Uses JSON mode (response_format={"type": "json_object"}) for reliable
-structured output. Non-streaming — we need the full JSON blob, not
-incremental tokens. Low temperature for consistency.
+Uses JSON output for reliable structured output. Non-streaming — we need
+the full JSON blob, not incremental tokens. Low temperature for consistency.
 """
 from __future__ import annotations
 
@@ -11,7 +10,8 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-from openai import AsyncOpenAI
+from google import genai
+from google.genai import types
 
 from app.agents.call_intelligence.prompt import SYSTEM_PROMPT, build_analysis_prompt
 from app.config import get_settings
@@ -31,19 +31,19 @@ class AnalysisResult:
     repayment_probability_reason: str = ""
     recommended_strategy: str = "reminder"
     next_call_talking_points: list[str] = field(default_factory=list)
-    model_used: str = "gpt-4o"
+    model_used: str = "gemini-2.0-flash"
 
 
 class CallAnalyzer:
     """
-    Sends a call transcript to GPT-4o and gets structured intelligence back.
+    Sends a call transcript to Gemini and gets structured intelligence back.
     Designed for post-call batch processing (not real-time).
     """
 
     def __init__(self) -> None:
         settings = get_settings()
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
-        self._model = settings.openai_llm_model
+        self._client = genai.Client(api_key=settings.gemini_api_key)
+        self._model = settings.gemini_model
 
     async def analyze_transcript(
         self,
@@ -51,34 +51,33 @@ class CallAnalyzer:
         borrower_context: dict,
     ) -> AnalysisResult:
         """
-        Send transcript + borrower context to GPT-4o (JSON mode).
+        Send transcript + borrower context to Gemini.
         Returns a validated AnalysisResult with all fields clamped to valid ranges.
         """
         user_prompt = build_analysis_prompt(transcript_text, borrower_context)
 
-        _new_model = any(self._model.startswith(p) for p in ("gpt-5", "o1", "o3", "o4"))
-        _token_kwarg = {"max_completion_tokens": 1000} if _new_model else {"max_tokens": 1000}
-        _temp_kwarg = {} if _new_model else {"temperature": 0.2}
-
         logger.info("Analyzing transcript with %s (%d chars)", self._model, len(transcript_text))
 
-        response = await self._client.chat.completions.create(
+        response = await self._client.aio.models.generate_content(
             model=self._model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format={"type": "json_object"},
-            **_token_kwarg,
-            **_temp_kwarg,
+            contents=[types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=user_prompt)],
+            )],
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                max_output_tokens=1000,
+                temperature=0.2,
+                response_mime_type="application/json",
+            ),
         )
 
-        raw_json = response.choices[0].message.content
+        raw_json = response.text
         try:
             data = json.loads(raw_json)
         except json.JSONDecodeError as exc:
-            logger.error("GPT-4o returned invalid JSON: %s", raw_json[:500])
-            raise ValueError(f"GPT-4o returned invalid JSON: {exc}") from exc
+            logger.error("Gemini returned invalid JSON: %s", raw_json[:500])
+            raise ValueError(f"Gemini returned invalid JSON: {exc}") from exc
 
         result = self._build(data)
         logger.info(
@@ -88,7 +87,7 @@ class CallAnalyzer:
         return result
 
     def _build(self, data: dict) -> AnalysisResult:
-        """Validate GPT-4o output and clamp all numeric fields to valid ranges."""
+        """Validate output and clamp all numeric fields to valid ranges."""
         valid_sentiments = {"hostile", "negative", "neutral", "positive", "cooperative"}
         valid_willingness = {"high", "medium", "low", "refused"}
         valid_strategies = {"reminder", "negotiation", "settlement", "escalation"}

@@ -48,14 +48,15 @@ class Settings(BaseSettings):
     deepgram_model: str = "nova-2"
     deepgram_endpointing_ms: int = 50
 
-    # ── OpenAI ────────────────────────────────────────────────────────────────
+    # ── Gemini (LLM — primary) ───────────────────────────────────────────────
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.0-flash"
+    gemini_fast_model: str = "gemini-2.0-flash-lite"
+    gemini_max_tokens: int = 150
+    gemini_temperature: float = 0.85
+
+    # ── OpenAI (embeddings only) ──────────────────────────────────────────────
     openai_api_key: str = ""
-    openai_llm_model: str = "gpt-4o"
-    openai_llm_max_tokens: int = 150
-    openai_llm_temperature: float = 0.4
-    # Fast model for first-sentence generation (lower TTFT)
-    openai_fast_model: str = "gpt-4o-mini"
-    openai_fast_max_tokens: int = 60
 
     # ── ElevenLabs (TTS) ─────────────────────────────────────────────────────
     elevenlabs_api_key: str = ""
