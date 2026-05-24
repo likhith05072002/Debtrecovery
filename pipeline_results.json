@@ -1,0 +1,108 @@
+{
+  "call_01": {
+    "original": {
+      "score": 100,
+      "verdict": "good",
+      "override": false,
+      "override_reason": "",
+      "penalties": {}
+    }
+  },
+  "call_02": {
+    "original": {
+      "score": 70,
+      "verdict": "bad",
+      "override": true,
+      "override_reason": "BLANK_CALL override: 82 real turns occurred but call was labeled as blank. This is both agent failure and data integrity failure.",
+      "penalties": {
+        "disposition_mismatch": 30
+      }
+    }
+  },
+  "call_03": {
+    "original": {
+      "score": 73,
+      "verdict": "bad",
+      "override": true,
+      "override_reason": "ALREADY_PAID LOOP override: call ran 901s with customer repeatedly providing UTR but agent never offered supervisor escalation.",
+      "penalties": {
+        "language_adherence": 12,
+        "resolution_failure": 15
+      }
+    }
+  },
+  "call_04": {
+    "original": {
+      "score": 100,
+      "verdict": "good",
+      "override": false,
+      "override_reason": "",
+      "penalties": {}
+    }
+  },
+  "call_05": {
+    "original": {
+      "score": 100,
+      "verdict": "good",
+      "override": false,
+      "override_reason": "",
+      "penalties": {}
+    }
+  },
+  "call_06": {
+    "original": {
+      "score": 100,
+      "verdict": "good",
+      "override": false,
+      "override_reason": "",
+      "penalties": {}
+    }
+  },
+  "call_07": {
+    "original": {
+      "score": 75,
+      "verdict": "bad",
+      "override": true,
+      "override_reason": "LANGUAGE_BARRIER override: call ended due to language issues and agent offered no English fallback or transfer strategy.",
+      "penalties": {
+        "language_adherence": 20,
+        "agent_repetition": 5
+      }
+    }
+  },
+  "call_08": {
+    "original": {
+      "score": 95,
+      "verdict": "good",
+      "override": false,
+      "override_reason": "",
+      "penalties": {
+        "agent_repetition": 5
+      }
+    }
+  },
+  "call_09": {
+    "original": {
+      "score": 85,
+      "verdict": "bad",
+      "override": true,
+      "override_reason": "INBOUND NO-DISCOVERY override: inbound callback (callback_opening phase present) went to negotiation without a discovery phase and ended as INQUIRY — agent never understood the customer's context.",
+      "penalties": {
+        "phase_completion": 5,
+        "inbound_callback": 10
+      }
+    }
+  },
+  "call_10": {
+    "original": {
+      "score": 85,
+      "verdict": "bad",
+      "override": true,
+      "override_reason": "PREMATURE GIVE-UP override: NO_COMMITMENT in only 9 turns. Agent did not attempt minimum required engagement before giving up.",
+      "penalties": {
+        "phase_completion": 5,
+        "premature_termination": 10
+      }
+    }
+  }
+}

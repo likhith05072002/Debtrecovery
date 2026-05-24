@@ -1,0 +1,78 @@
+# Core Framework
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+websockets==12.0
+python-multipart==0.0.9
+
+# Async / Task Queue
+celery[redis]==5.4.0
+redis==5.0.4
+kombu==5.3.7
+
+# Database
+sqlalchemy[asyncio]==2.0.30
+asyncpg==0.29.0
+alembic==1.13.1
+psycopg2-binary==2.9.9
+
+# Pydantic / Settings
+pydantic==2.7.1
+pydantic-settings==2.2.1
+python-dotenv==1.0.1
+
+# Telephony
+twilio==9.0.4
+
+# STT
+deepgram-sdk==3.2.7
+
+# LLM
+openai>=1.35.0
+tiktoken==0.7.0
+
+# TTS
+elevenlabs==1.1.2
+
+# Vector DB / Embeddings
+faiss-cpu==1.8.0
+numpy==1.26.4
+
+# Profiling / ML
+scikit-learn==1.5.0
+xgboost==2.0.3
+joblib==1.4.2
+scipy==1.13.0
+
+# Audio Processing
+# audioop is built-in on Python 3.11 (audioop-lts only needed for 3.13+)
+pydub==0.25.1
+soundfile==0.12.1
+
+# Neural VAD (Silero)
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Monitoring
+prometheus-client==0.20.0
+opentelemetry-api==1.24.0
+opentelemetry-sdk==1.24.0
+opentelemetry-instrumentation-fastapi==0.45b0
+
+# Security / Crypto
+cryptography==42.0.7
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
+
+# HTTP Client
+httpx==0.27.0
+aiohttp==3.9.5
+
+# Billing
+stripe>=8.0.0
+
+# Utilities
+python-dateutil==2.9.0
+pytz==2024.1
+phonenumbers==8.13.36
+structlog==24.2.0
+tenacity==8.3.0

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Shell",
+      "Write",
+      "Edit",
+      "Read"
+    ],
+    "autoApprove": true
+  }
+}
