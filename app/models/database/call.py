@@ -20,6 +20,7 @@ class Call(Base):
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
     twilio_call_sid: Mapped[str | None] = mapped_column(String(64), unique=True)
+    livekit_room_name: Mapped[str | None] = mapped_column(String(128))  # LiveKit room for this call
     borrower_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("borrowers.id"), nullable=False)
     campaign_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("campaigns.id"))
     direction: Mapped[str] = mapped_column(String(10), default="outbound")

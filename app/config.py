@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     silk_default_voice: str = "silk-en-male-professional"
     tts_provider: str = "auto"                 # "silk" | "elevenlabs" | "auto"
 
+    # ── LiveKit ───────────────────────────────────────────────────────────────
+    livekit_url: str = ""                      # wss://your-project.livekit.cloud
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+    sip_outbound_trunk_id: str = ""            # LiveKit SIP trunk ID (linked to Twilio)
+
     # ── Vector Store ──────────────────────────────────────────────────────────
     vector_store_path: str = "./ml/vector_store"
     vector_embedding_model: str = "text-embedding-3-small"

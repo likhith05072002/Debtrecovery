@@ -48,9 +48,13 @@ scipy==1.13.0
 pydub==0.25.1
 soundfile==0.12.1
 
-# Neural VAD (Silero)
+# Neural VAD (Silero) — also used by LiveKit silero plugin
 torch>=2.0.0
 torchaudio>=2.0.0
+
+# LiveKit Agents Framework
+livekit-agents[openai,silero,deepgram,turn-detector]>=1.0.0
+livekit-api>=1.0.0
 
 # Monitoring
 prometheus-client==0.20.0

@@ -92,6 +92,28 @@ services:
       - redis
     command: celery -A app.workers.celery_app beat --loglevel=info
 
+  # ─── LiveKit Agent Worker ──────────────────────────────────────────────────
+  livekit-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://debtcollector:debtcollector@postgres:5432/debtcollector
+      REDIS_URL: redis://redis:6379/0
+      LIVEKIT_URL: ${LIVEKIT_URL}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+      - ./ml:/app/ml
+    command: python -m app.agents.livekit_worker start
+
   # ─── Flower (Celery Monitoring) ───────────────────────────────────────────
   flower:
     image: mher/flower:2.0.1
